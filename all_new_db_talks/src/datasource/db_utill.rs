@@ -248,7 +248,7 @@ mod test {
 
     #[tokio::test]
     async fn test_query() {
-        let mut db_util = DbUtil::new().unwrap();
+        let db_util = DbUtil::new().unwrap();
         let sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'Chinook';";
         let result = db_util.query(sql).await.unwrap();
         print!("{:?}", result);

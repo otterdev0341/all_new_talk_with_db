@@ -3,12 +3,10 @@ use std::env;
 use anyhow::Error;
 use crate::{configuration::model_config::ModelSelect, datasource::async_db_utill::AsyncDb};
 use ollama_rs::{generation::completion::request::GenerationRequest, Ollama};
-use serde_json::Value;
-use sqlx::mysql::{MySqlPool, MySqlRow};
+use sqlx::mysql::MySqlPool;
 use async_trait::async_trait;
-use crate::{configuration::llm_config::LLMConfig, datasource::db_utill::{DatabaseSchema, DbUtil}, trait_req_impl::chain::Chain};
+use crate::{datasource::db_utill::{DatabaseSchema, DbUtil}, trait_req_impl::chain::Chain};
 use dotenv::dotenv;
-use sqlx::Row;
 use anyhow::anyhow;
 pub struct TextToSqlChain{
     pub client: Ollama,
@@ -40,15 +38,19 @@ impl Chain for TextToSqlChain {
     async fn run(&self, input: String) -> Result<String, Error>{
         let prompt = self.construct_prompt(input).await?;
         let request = GenerationRequest::new(
-            ModelSelect::NplOperate.as_str(),
+            ModelSelect::SqlOperate.as_str(),
             prompt
         );
         let sql = self.client.generate(request).await.unwrap();
-        // println!("SQL is {:?}", sql);
-
+        println!("SQL is {:?}", sql.response);
+        let clean_query = sql.response
+        .replace("```sql", "")
+        .replace("```", "")
+        .trim()
+        .to_string();
         
         let asy_db = AsyncDb::new().unwrap();
-        let query_data = asy_db.query_as_string(sql.response).await.unwrap();
+        let query_data = asy_db.query_as_string(clean_query).await.unwrap();
         Ok(query_data)
     }
 }
@@ -98,16 +100,6 @@ impl TextToSqlChain {
         Ok(prompt)
     }
 
-    async fn query(&self, generated_query: String) -> Result<String, Error> {
-        let db_utill = match DbUtil::new() {
-            Ok(db_tool) => db_tool,
-            Err(_) => return Err(anyhow!("fail to connect to db"))
-        };
-    
-        let result = db_utill.query_as_string(generated_query).await.unwrap();
-        Ok(result)
-        
-    }
 }
 
 
