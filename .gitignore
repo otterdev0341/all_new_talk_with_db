@@ -1,0 +1,16 @@
+
+Cargo.lock
+target/
+Cargo.toml.orig
+.DS_Store
+
+# ignore any IDE-specific files and folders
+.vscode/
+.idea/
+
+# ignore build artifacts
+*.min.js
+*.min.css
+
+# ignore test output
+/target/debug/output
