@@ -14,7 +14,5 @@ async fn main() {
     let output = processor.run(input)
         .await
         .unwrap();
-    println!("{:?}", output);
-  
-
+    println!("Response {:?}", output);
 }

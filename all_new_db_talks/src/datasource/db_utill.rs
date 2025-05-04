@@ -1,9 +1,17 @@
+use std::collections::HashMap;
+use std::fmt;
+
 use diesel::prelude::*;
 use diesel::{Connection, MysqlConnection, QueryResult, RunQueryDsl};
 use diesel::sql_query;
 use diesel::sql_types::Text;
-use anyhow::Result;
+use anyhow::{Error, Result};
+use mysql::prelude::Queryable;
+use mysql::{Opts, Pool, Row};
 use serde::{Deserialize, Serialize};
+use anyhow::anyhow;
+
+use crate::configuration::db_config::DatabaseConfig;
 
 pub struct DbUtil {
     pub db_con: MysqlConnection,
@@ -46,6 +54,24 @@ impl Default for DatabaseSchema {
         Self {
             schemas: Vec::new(),
         }
+    }
+}
+
+impl fmt::Display for DatabaseSchema {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for table in &self.schemas {
+            writeln!(f, "Table: {}", table.table_name)?;
+            for column in &table.field_columns {
+                writeln!(f, "  - {}", column.column_name)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for ColumnName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.column_name)
     }
 }
 
@@ -121,7 +147,77 @@ impl DbUtil {
         let results: Vec<ColumnName> = sql_query(query).load(&mut self.db_con)?;
         Ok(results.into_iter().map(|r| r.column_name).collect())
     }
+
+
+    pub async fn query(&self, query: &str) -> Result<Vec<HashMap<String, String>>, Box<dyn std::error::Error>>{
+        let url = DatabaseConfig::inject_from_env(); // adjust as needed
+        let db_option = Opts::from_url(&url.db_url).unwrap();
+        let pool = Pool::new(db_option)?;
+        let mut conn = pool.get_conn()?;
+    
+        let result: Vec<Row> = conn.query(query)?;
+    
+        let mut rows: Vec<HashMap<String, String>> = Vec::new();
+    
+        for row in result {
+            let mut map = HashMap::new();
+            for (i, col) in row.columns_ref().iter().enumerate() {
+                let key = col.name_str().to_string();
+                let value = row.as_ref(i).map(|v| Self::value_to_string(v)).unwrap_or_default();
+
+                map.insert(key, value);
+            }
+            rows.push(map);
+        }
+    
+        Ok(rows)
+    }
+    fn value_to_string(val: &mysql::Value) -> String {
+        match val {
+            mysql::Value::NULL => "NULL".to_string(),
+            mysql::Value::Bytes(bytes) => String::from_utf8_lossy(bytes).to_string(),
+            mysql::Value::Int(i) => i.to_string(),
+            mysql::Value::UInt(u) => u.to_string(),
+            mysql::Value::Float(f) => f.to_string(),
+            mysql::Value::Double(d) => d.to_string(),
+            mysql::Value::Date(y, m, d, h, min, s, micros) => {
+                format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+                    y, m, d, h, min, s, micros
+                )
+            }
+            mysql::Value::Time(is_neg, d, h, m, s, micros) => {
+                let sign = if *is_neg { "-" } else { "" };
+                // Dereferencing `d` and `h` here:
+                let total_hours = (*d as u32) * 24 + (*h as u32);
+                format!("{sign}{:03}:{:02}:{:02}.{:06}", total_hours, m, s, micros)
+            }
+        }
+    }
+
+    pub async fn query_as_string(&self, generated_query: String) -> Result<String, Error> {
+        let db_util = match DbUtil::new() {
+            Ok(db_util) => db_util,
+            Err(_) => return Err(anyhow!("fail to connect to db")),
+        };
+    
+        let result = db_util.query(&generated_query).await.unwrap();
+    
+        // Convert the Vec<HashMap<String, String>> into a formatted string
+        let mut output = String::new();
+        for (i, row) in result.iter().enumerate() {
+            output.push_str(&format!("Row {}:\n", i + 1));
+            for (key, value) in row {
+                output.push_str(&format!("  {}: {}\n", key, value));
+            }
+        }
+    
+        Ok(output)
+    }
+    
 }
+
+
 
 
 
@@ -149,4 +245,14 @@ mod test {
         let schema = db_util.get_database_schema();
         println!("{:#?}", schema);
     }
+
+    #[tokio::test]
+    async fn test_query() {
+        let mut db_util = DbUtil::new().unwrap();
+        let sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'Chinook';";
+        let result = db_util.query(sql).await.unwrap();
+        print!("{:?}", result);
+    }
+
+
 }

@@ -1,13 +1,15 @@
 use std::env;
 
 use anyhow::Error;
-use ollama_rs::Ollama;
+use crate::{configuration::model_config::ModelSelect, datasource::async_db_utill::AsyncDb};
+use ollama_rs::{generation::completion::request::GenerationRequest, Ollama};
+use serde_json::Value;
 use sqlx::mysql::{MySqlPool, MySqlRow};
 use async_trait::async_trait;
-use crate::trait_req_impl::chain::Chain;
+use crate::{configuration::llm_config::LLMConfig, datasource::db_utill::{DatabaseSchema, DbUtil}, trait_req_impl::chain::Chain};
 use dotenv::dotenv;
 use sqlx::Row;
-
+use anyhow::anyhow;
 pub struct TextToSqlChain{
     pub client: Ollama,
     pub db: MySqlPool
@@ -36,55 +38,75 @@ impl Chain for TextToSqlChain {
 
 
     async fn run(&self, input: String) -> Result<String, Error>{
-        let result = self.get_db_info(&self.db).await.unwrap();
-        Ok(result)
+        let prompt = self.construct_prompt(input).await?;
+        let request = GenerationRequest::new(
+            ModelSelect::NplOperate.as_str(),
+            prompt
+        );
+        let sql = self.client.generate(request).await.unwrap();
+        // println!("SQL is {:?}", sql);
+
+        
+        let asy_db = AsyncDb::new().unwrap();
+        let query_data = asy_db.query_as_string(sql.response).await.unwrap();
+        Ok(query_data)
     }
 }
 
 
 impl TextToSqlChain {
-    pub async fn get_db_info(&self, pool: &MySqlPool) -> Result<String, Error> {
-        let mut schema_description = String::new();
+    pub async fn get_db_info(&self) -> Result<DatabaseSchema, Error> {
+        let tool = match DbUtil::new() {
+            Ok(mut data) => {
+                let result = data.get_database_schema();
+                Ok(result)
+            },
+            Err(_) => Err(anyhow!("fail to get database schema")),
+        };
+
+        tool
+    }
+
+    pub async fn construct_prompt(&self, input:String) -> Result<String, Error> {
+        let mut db = match DbUtil::new() {
+            Ok(tool) => tool,
+            Err(_) => return Err(anyhow!("Failed to retive database schema"))
+        };
+        let db_schema = db.get_database_schema();
+
+        let prompt = format!(
+            "You are a database expert.
     
-        // Step 1: Get current database name
-        let current_db_row = sqlx::query("SELECT DATABASE() AS db")
-            .fetch_one(pool)
-            .await?;
+            Database Schema:
+            {}
+            
+            Instructions:
+            - Generate ONE correct SQL query for SQLite that answers the given user question.
+            - Only output the SQL command.
+            - No explanations, no examples, no prefixes (such as 'Example:', 'SQL:', 'Response:', 'Result:').
+            - No formatting like markdown (no ```sql blocks).
+            - Output ONLY the SQL query — no extra text.
+            
+            User Question:
+            {}
+            
+            Remember: ONLY output a single valid SQL command.",
+            db_schema,
+            input.trim()
+        );
     
-        let current_db: String = current_db_row.try_get("db")?;
+        Ok(prompt)
+    }
+
+    async fn query(&self, generated_query: String) -> Result<String, Error> {
+        let db_utill = match DbUtil::new() {
+            Ok(db_tool) => db_tool,
+            Err(_) => return Err(anyhow!("fail to connect to db"))
+        };
     
-        // Step 2: Get all table names from current database
-        let tables = sqlx::query(
-            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?"
-        )
-        .bind(&current_db)
-        .fetch_all(pool)
-        .await?;
-    
-        for table in tables {
-            let table_name: String = table.try_get("TABLE_NAME")?;
-            schema_description.push_str(&format!("Table \"{}\":\n", table_name));
-    
-            // Step 3: Get all columns for this table (name and type)
-            let columns = sqlx::query(
-                "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS \
-                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
-            )
-            .bind(&current_db)
-            .bind(&table_name)
-            .fetch_all(pool)
-            .await?;
-    
-            for col in columns {
-                let column_name: String = col.try_get("COLUMN_NAME")?;
-                let column_type: String = col.try_get("DATA_TYPE")?;
-                schema_description.push_str(&format!("- {} ({})\n", column_name, column_type));
-            }
-    
-            schema_description.push('\n');
-        }
-    
-        Ok(schema_description)
+        let result = db_utill.query_as_string(generated_query).await.unwrap();
+        Ok(result)
+        
     }
 }
 
